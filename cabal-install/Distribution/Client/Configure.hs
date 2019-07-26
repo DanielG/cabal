@@ -222,6 +222,8 @@ configureSetupScript packageDBs
     , useDependenciesExclusive = not defaultSetupDeps && isJust explicitSetupDeps
     , useVersionMacros         = not defaultSetupDeps && isJust explicitSetupDeps
     , isInteractive            = False
+    , processCloseHandle       = True
+    , processCloseFds          = False
     }
   where
     -- When we are compiling a legacy setup script without an explicit
