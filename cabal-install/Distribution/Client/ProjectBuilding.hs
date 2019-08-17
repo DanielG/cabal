@@ -954,6 +954,16 @@ buildAndInstallUnpackedPackage verbosity
 
     bracket_ initLogFile closeLogFile $ do
 
+    let
+        entering = withLogging $ \mLogFileHandle -> do
+          let hdl = fromMaybe stdout mLogFileHandle
+          hPutStrLn hdl $ "Entering directory '" ++ srcdir ++ "'"
+        leaving  = withLogging $ \mLogFileHandle -> do
+          let hdl = fromMaybe stdout mLogFileHandle
+          hPutStrLn hdl $ "Leaving directory '" ++ srcdir ++ "'"
+
+    bracket_ entering leaving $ do
+
     --TODO: [code cleanup] deal consistently with talking to older
     --      Setup.hs versions, much like we do for ghc, with a proper
     --      options type and rendering step which will also let us
@@ -1232,6 +1242,16 @@ buildInplaceUnpackedPackage verbosity
           (distPackageCacheDirectory dparams)
 
         bracket_ initLogFile closeLogFile $ do
+
+        let
+            entering = withLogging $ \mLogFileHandle -> do
+              let hdl = fromMaybe stdout mLogFileHandle
+              hPutStrLn hdl $ "Entering directory '" ++ srcdir ++ "'"
+            leaving  = withLogging $ \mLogFileHandle -> do
+              let hdl = fromMaybe stdout mLogFileHandle
+              hPutStrLn hdl $ "Leaving directory '" ++ srcdir ++ "'"
+
+        bracket_ entering leaving $ do
 
         -- Configure phase
         --
