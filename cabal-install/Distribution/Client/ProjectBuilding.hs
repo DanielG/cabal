@@ -6,6 +6,8 @@
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE NondecreasingIndentation #-}
 
 -- |
 --
@@ -48,6 +50,7 @@ import           Distribution.Client.ProjectConfig
 import           Distribution.Client.ProjectPlanning
 import           Distribution.Client.ProjectPlanning.Types
 import           Distribution.Client.ProjectBuilding.Types
+import           Distribution.Client.ProjectLogging
 import           Distribution.Client.Store
 
 import           Distribution.Client.Types
@@ -582,6 +585,8 @@ rebuildTargets verbosity
     cacheLock     <- newLock -- serialise access to setup exe cache
                              --TODO: [code cleanup] eliminate setup exe cache
 
+    logHandleMap  <- newLogHandleMap pkgsBuildStatus installPlan
+
     debug verbosity $
         "Executing install plan "
      ++ if isParallelBuild
@@ -605,10 +610,13 @@ rebuildTargets verbosity
         handle (\(e :: BuildFailure) -> return (Left e)) $ fmap Right $
 
         let uid = installedUnitId pkg
-            Just pkgBuildStatus = Map.lookup uid pkgsBuildStatus in
+            Just pkgBuildStatus = Map.lookup uid pkgsBuildStatus
+            Just logHandle = Map.lookup uid logHandleMap
+        in
 
         rebuildTarget
           verbosity
+          logHandle
           distDirLayout
           storeDirLayout
           buildSettings downloadMap
@@ -648,6 +656,7 @@ createPackageDBIfMissing _ _ _ _ = return ()
 -- | Given all the context and resources, (re)build an individual package.
 --
 rebuildTarget :: Verbosity
+              -> LogHandle
               -> DistDirLayout
               -> StoreDirLayout
               -> BuildTimeSettings
@@ -659,6 +668,7 @@ rebuildTarget :: Verbosity
               -> BuildStatus
               -> IO BuildResult
 rebuildTarget verbosity
+              logHandle
               distDirLayout@DistDirLayout{distBuildDirectory}
               storeDirLayout
               buildSettings downloadMap
@@ -715,7 +725,7 @@ rebuildTarget verbosity
 
     buildAndInstall srcdir builddir =
         buildAndInstallUnpackedPackage
-          verbosity distDirLayout storeDirLayout
+          verbosity logHandle distDirLayout storeDirLayout
           buildSettings registerLock cacheLock
           sharedPackageConfig
           plan rpkg
@@ -727,7 +737,7 @@ rebuildTarget verbosity
     buildInplace buildStatus srcdir builddir =
         --TODO: [nice to have] use a relative build dir rather than absolute
         buildInplaceUnpackedPackage
-          verbosity distDirLayout
+          verbosity logHandle distDirLayout
           buildSettings registerLock cacheLock
           sharedPackageConfig
           plan rpkg
@@ -912,6 +922,7 @@ moveTarballShippedDistDirectory verbosity DistDirLayout{distBuildDirectory}
 
 
 buildAndInstallUnpackedPackage :: Verbosity
+                               -> LogHandle
                                -> DistDirLayout
                                -> StoreDirLayout
                                -> BuildTimeSettings -> Lock -> Lock
@@ -921,6 +932,7 @@ buildAndInstallUnpackedPackage :: Verbosity
                                -> FilePath -> FilePath
                                -> IO BuildResult
 buildAndInstallUnpackedPackage verbosity
+                               logHandle
                                distDirLayout@DistDirLayout{distTempDirectory}
                                storeDirLayout@StoreDirLayout {
                                  storePackageDBStack
@@ -939,7 +951,8 @@ buildAndInstallUnpackedPackage verbosity
                                srcdir builddir = do
 
     createDirectoryIfMissingVerbose verbosity True (srcdir </> builddir)
-    initLogFile
+
+    bracket_ initLogFile closeLogFile $ do
 
     --TODO: [code cleanup] deal consistently with talking to older
     --      Setup.hs versions, much like we do for ghc, with a proper
@@ -1125,6 +1138,8 @@ buildAndInstallUnpackedPackage verbosity
           verbosity
           scriptOptions
             { useLoggingHandle     = mLogFileHandle
+            , processCloseHandle   = False
+            , processCloseFds      = True
             , useExtraEnvOverrides = dataDirsEnvironmentForPlan
                                      distDirLayout plan }
           (Just (elabPkgDescription pkg))
@@ -1143,11 +1158,17 @@ buildAndInstallUnpackedPackage verbosity
           createDirectoryIfMissing True (takeDirectory logFile)
           exists <- doesFileExist logFile
           when exists $ removeFile logFile
+          openLogHandle logHandle logFile stdout
+
+    closeLogFile =
+      case mlogFile of
+        Nothing -> return ()
+        Just _ -> closeLogHandle logHandle
 
     withLogging action =
       case mlogFile of
-        Nothing      -> action Nothing
-        Just logFile -> withFile logFile AppendMode (action . Just)
+        Nothing -> action Nothing
+        Just _  -> withLogHandle logHandle (action . Just)
 
 
 hasValidHaddockTargets :: ElaboratedConfiguredPackage -> Bool
@@ -1172,6 +1193,7 @@ hasValidHaddockTargets ElaboratedConfiguredPackage{..}
 
 
 buildInplaceUnpackedPackage :: Verbosity
+                            -> LogHandle
                             -> DistDirLayout
                             -> BuildTimeSettings -> Lock -> Lock
                             -> ElaboratedSharedConfig
@@ -1181,14 +1203,19 @@ buildInplaceUnpackedPackage :: Verbosity
                             -> FilePath -> FilePath
                             -> IO BuildResult
 buildInplaceUnpackedPackage verbosity
+                            logHandle
                             distDirLayout@DistDirLayout {
                               distTempDirectory,
                               distPackageCacheDirectory,
                               distDirectory
                             }
-                            BuildTimeSettings{buildSettingNumJobs}
+                            BuildTimeSettings {
+                              buildSettingNumJobs,
+                              buildSettingLogFile
+                            }
                             registerLock cacheLock
                             pkgshared@ElaboratedSharedConfig {
+                              pkgConfigPlatform      = platform,
                               pkgConfigCompiler      = compiler,
                               pkgConfigCompilerProgs = progdb
                             }
@@ -1203,6 +1230,8 @@ buildInplaceUnpackedPackage verbosity
         createDirectoryIfMissingVerbose verbosity True builddir
         createDirectoryIfMissingVerbose verbosity True
           (distPackageCacheDirectory dparams)
+
+        bracket_ initLogFile closeLogFile $ do
 
         -- Configure phase
         --
@@ -1406,10 +1435,15 @@ buildInplaceUnpackedPackage verbosity
     setup :: CommandUI flags -> (Version -> flags) -> (Version -> [String])
           -> IO ()
     setup cmd flags args =
-      setupWrapper verbosity
-                   scriptOptions
-                   (Just (elabPkgDescription pkg))
-                   cmd flags args
+      withLogging $ \mLogFileHandle ->
+        setupWrapper
+          verbosity
+          scriptOptions { useLoggingHandle = mLogFileHandle
+                        , processCloseHandle = False
+                        , processCloseFds    = True
+                        }
+          (Just (elabPkgDescription pkg))
+          cmd flags args
 
     generateInstalledPackageInfo :: IO InstalledPackageInfo
     generateInstalledPackageInfo =
@@ -1420,6 +1454,34 @@ buildInplaceUnpackedPackage verbosity
                                 verbosity builddir
                                 pkgConfDest
         setup Cabal.registerCommand registerFlags (const [])
+
+    pkgid  = packageId rpkg
+    uid    = installedUnitId rpkg
+
+    mlogFile :: Maybe FilePath
+    mlogFile =
+      case buildSettingLogFile of
+        Nothing        -> Nothing
+        Just mkLogFile -> Just (mkLogFile compiler platform pkgid uid)
+
+    initLogFile =
+      case mlogFile of
+        Nothing      -> return ()
+        Just logFile -> do
+          createDirectoryIfMissing True (takeDirectory logFile)
+          exists <- doesFileExist logFile
+          when exists $ removeFile logFile
+          openLogHandle logHandle logFile stdout
+
+    closeLogFile =
+      case mlogFile of
+        Nothing -> return ()
+        Just _ -> closeLogHandle logHandle
+
+    withLogging action =
+      case mlogFile of
+        Nothing -> action Nothing
+        Just _  -> withLogHandle logHandle (action . Just)
 
 withTempInstalledPackageInfoFile :: Verbosity -> FilePath
                                   -> (FilePath -> IO ())

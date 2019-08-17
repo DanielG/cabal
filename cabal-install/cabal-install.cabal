@@ -220,6 +220,7 @@ executable cabal
         Distribution.Client.ProjectConfig
         Distribution.Client.ProjectConfig.Legacy
         Distribution.Client.ProjectConfig.Types
+        Distribution.Client.ProjectLogging
         Distribution.Client.ProjectOrchestration
         Distribution.Client.ProjectPlanOutput
         Distribution.Client.ProjectPlanning
